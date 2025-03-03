@@ -1,8 +1,7 @@
 import numpy as np
-import cv2
-import torch
-from yolov9_model import YOLOv9_GPU, YOLOv9_FPGA
+from yolov5_model import YOLOv5_GPU, YOLOv5_FPGA
 from dataset_preprocessing import get_datasets, get_data_loaders
+import torch
 
 class DecisionMaker:
     def __init__(self, use_fpga=False):
@@ -11,14 +10,15 @@ class DecisionMaker:
         The system uses YOLO model outputs to make real-time decisions.
         """
         self.use_fpga = use_fpga
-        self.device = torch.device("cuda" if torch.cuda.is_available() and not use_fpga else "cpu")
+        self.device = torch.device("cpu" if use_fpga else "cuda")
         
         # Load YOLO model
         if use_fpga:
-            self.model = YOLOv9_FPGA(num_classes=5)
+            self.model = YOLOv5_FPGA(num_classes=5)
         else:
-            self.model = YOLOv9_GPU(num_classes=5)
-            self.model.load_state_dict(torch.load("yolov9_gpu.pth"))
+            self.model = YOLOv5_GPU(num_classes=5)
+            self.model.load_state_dict(torch.load("yolov5_gpu.pth"))
+        
         self.model.to(self.device)
         self.model.eval()
 
@@ -31,15 +31,6 @@ class DecisionMaker:
         
         # Initialize V-table (state value function)
         self.v_table = np.zeros(self.state_space)
-        
-        # Initialize state transition model
-        self.transition_counts = {}  # Count transitions to estimate probabilities
-        self.transition_probs = {}  # Estimated transition probabilities
-        
-        # Initialize reward function parameters
-        self.collision_penalty = -100
-        self.safe_driving_reward = 20
-        self.default_penalty = -2
         
         # Reinforcement learning parameters
         self.learning_rate = 0.05
@@ -62,7 +53,7 @@ class DecisionMaker:
         speed_bin = min(int(speed // 5), 4)         # 5 bins @ 5m/s each
         
         return (class_id, distance_bin, speed_bin)
-    
+
     def choose_action(self, state):
         """
         Choose an action based on epsilon-greedy policy.
@@ -75,7 +66,7 @@ class DecisionMaker:
             return np.random.choice(["Brake", "Turn Left", "Turn Right", "Continue"])
         else:
             return ["Brake", "Turn Left", "Turn Right", "Continue"][np.argmax(self.q_table[state])]
-    
+
     def calculate_reward(self, state, action):
         """
         Calculate the reward based on the state and action.
@@ -87,43 +78,51 @@ class DecisionMaker:
         """
         class_id, distance_bin, speed_bin = state
         if distance_bin == 0:  # Collision
-            return self.collision_penalty
+            return -100
         elif action == "Continue" and distance_bin > 5:  # Safe driving
-            return self.safe_driving_reward
+            return 20
         else:
-            return self.default_penalty
+            return -2
 
-    def make_decision(self, image_path):
+    def update_value_functions(self, state, action, reward, next_state):
         """
-        Make decisions based on YOLO detections from an image.
+        Update both state value function (V) and action value function (Q).
         Args:
-            image_path: Path to the input image.
+            state: The current state.
+            action: The action taken.
+            reward: The reward received.
+            next_state: The next state.
         """
-        # Load image and preprocess
-        image = cv2.imread(image_path)
-        image = cv2.resize(image, (640, 640))
-        image = image.transpose(2, 0, 1)  # HWC to CHW
-        image = image / 255.0
-        image = torch.tensor(image, dtype=torch.float32).unsqueeze(0).to(self.device)
+        # Update action value function (Q-learning)
+        max_future_q = np.max(self.q_table[next_state])
+        current_q = self.q_table[state][action]
+        new_q = (1 - self.learning_rate) * current_q + \
+                self.learning_rate * (reward + self.discount_factor * max_future_q)
+        self.q_table[state][action] = new_q
         
-        # Run inference
+        # Update state value function (V = max_a Q(s, a))
+        self.v_table[state] = np.max(self.q_table[state])
+
+    def make_decision(self, image):
+        """
+        Make decisions based on YOLO detections.
+        Args:
+            image: Input image tensor.
+        Returns:
+            A list of decisions for each detection.
+        """
         with torch.no_grad():
-            outputs = self.model(image)
-            detections = outputs[0].cpu().numpy()
+            image = image.to(self.device)
+            detections = self.model(image)
+            detections = detections.cpu().numpy()
         
-        # Process detections
         decisions = []
         for detection in detections:
-            class_id, x_center, y_center, speed = detection
-            state = self.get_state((class_id, x_center, y_center, speed))
+            state = self.get_state(detection)
             action = self.choose_action(state)
             reward = self.calculate_reward(state, action)
-            decisions.append((state, action, reward))
+            next_state = state  # Simplified: assume next state is the same
+            self.update_value_functions(state, action, reward, next_state)
+            decisions.append(action)
         
         return decisions
-
-if __name__ == "__main__":
-    decision_maker = DecisionMaker(use_fpga=False)
-    decisions = decision_maker.make_decision("path/to/image.jpg")
-    for state, action, reward in decisions:
-        print(f"State: {state}, Action: {action}, Reward: {reward}")

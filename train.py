@@ -1,8 +1,6 @@
 import torch
-from torch.optim import AdamW, SGD
-from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
-from yolov9_model import YOLOv9_GPU, YOLOv9_FPGA
+from torch.optim import AdamW
+from yolov5_model import YOLOv5_GPU, YOLOv5_FPGA
 from dataset_preprocessing import get_datasets, get_data_loaders
 import torch.nn as nn
 
@@ -17,25 +15,39 @@ class FocalLoss(nn.Module):
     def forward(self, inputs, targets):
         ce_loss = self.ce(inputs, targets)
         pt = torch.exp(-ce_loss)
-        loss = self.alpha * (1-pt)**self.gamma * ce_loss
+        loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
         return loss.mean()
 
 def train_model(use_fpga=False):
-    device = torch.device("cuda" if (torch.cuda.is_available() and not use_fpga) else "cpu")
+    """Train YOLOv5 model with strict hardware separation (FPGA/GPU)"""
+    # Hardware mode check
+    if use_fpga and torch.cuda.is_available():
+        raise RuntimeError("FPGA mode cannot coexist with GPU. Disable CUDA.")
+    
+    device = torch.device("cpu" if use_fpga else "cuda")
     
     # Initialize model
-    model = YOLOv9_GPU(num_classes=5) if not use_fpga else YOLOv9_FPGA(num_classes=5)
+    if use_fpga:
+        try:
+            model = YOLOv5_FPGA(num_classes=5)
+        except RuntimeError as e:
+            print(f"FPGA Error: {str(e)}")
+            exit(1)
+    else:
+        model = YOLOv5_GPU(num_classes=5)
+    
     model = model.to(device)
     
-    # Add FPGA-specific training logic
-    if use_fpga:
-        optimizer = AdamW(model.parameters(), lr=1e-4)  # Lower learning rate for FPGA stability
-        grad_accum_steps = 8  # More frequent FPGA updates
-    else:
-        optimizer = AdamW(model.parameters(), lr=2e-4)
-        grad_accum_steps = 4
-        
-    # Training loop modifications
+    # Optimizer configuration
+    optimizer = AdamW(model.parameters(), lr=1e-4 if use_fpga else 2e-4)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    cls_criterion = FocalLoss()
+    
+    # Load datasets
+    train_dataset, val_dataset, test_dataset = get_datasets()
+    train_loader, val_loader, test_loader = get_data_loaders(train_dataset, val_dataset, test_dataset, batch_size=32)
+    
+    # Training loop for 32x32 memristor array
     for epoch in range(300):
         model.train()
         total_loss = 0
@@ -44,25 +56,33 @@ def train_model(use_fpga=False):
             data, target = data.to(device), target.to(device)
             
             # Forward pass
-            with torch.cuda.amp.autocast(enabled=device.type == 'cuda'):
-                main_out, aux_out = model(data)
-                loss = cls_criterion(main_out, target) + 0.3*cls_criterion(aux_out, target)
+            optimizer.zero_grad()
+            outputs = model(data)
+            loss = cls_criterion(outputs, target)
             
             # Backpropagation
-            scaler.scale(loss).backward()
+            loss.backward()
+            optimizer.step()
             
-            # Gradient accumulation and FPGA updates
-            if (batch_idx+1) % grad_accum_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                
-                # Update FPGA weights iteratively
-                if use_fpga:
-                    try:
-                        model.update_fpga_weights()
-                    except RuntimeError as e:
-                        print(f"Training aborted: {str(e)}")
-                        return
-                
-                scheduler.step()
+            # Frequent FPGA updates for small array
+            if use_fpga and (batch_idx % 4 == 0):  # Update every 4 batches
+                try:
+                    model.update_fpga_weights()
+                except RuntimeError as e:
+                    print(f"FPGA weight update failed: {str(e)}")
+                    return
+            
+            total_loss += loss.item()
+        
+        # Learning rate scheduling
+        scheduler.step()
+        print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
+    
+    # Save GPU model
+    if not use_fpga:
+        torch.save(model.state_dict(), "yolov5_gpu.pth")
+    else:
+        print("FPGA training completed. Weights stored on hardware.")
+
+if __name__ == "__main__":
+    train_model(use_fpga=True)
