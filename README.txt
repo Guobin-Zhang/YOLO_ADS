@@ -1,0 +1,16 @@
+All of the data for this work can be found in the main text and in the Supplementary Information. The COCO 2017 Dataset can be accessed via https://www.kaggle.com/datasets/awsaf49/coco-2017-dataset. The Mapillary Traffic Sign Dataset can be accessed via https://labelbox.com/datasets/mapillary-traffic-sign-dataset/. The LISA Traffic Sign Dataset can be accessed via https://github.com/AminJun/lisa. Lyft L5 Dataset can be accessed at https://paperswithcode.com/dataset/lyft-level-5-prediction. Berkeley DeepDrive Dataset (BDD100K) can be accessed at https://doc.bdd100k.com/download.html. All source data are attached to this paper. Any other data supporting this work can be requested from the corresponding author.
+
+Code Dependencies and System Requirements:
+The codebase requires Python 3.8.10 or later, PyTorch 1.12.1 with CUDA 11.3 for GPU acceleration, and additional packages including NumPy, OpenCV, PyUSB, and TensorBoard. The FPGA implementation specifically requires a Xilinx Alveo U250 accelerator card with the Xilinx Vitis 2022.1 toolchain installed. The system must run either Ubuntu 20.04 LTS (recommended) or Windows 10 Pro/Enterprise (64-bit) version 1903 or later with WSL2 for FPGA support. USB permissions must be configured for FPGA communication, and NVIDIA drivers must be installed for GPU operation.
+
+Installation Guide:
+To set up the environment, first install Python 3.8 and create a virtual environment. Install PyTorch with CUDA 11.3 support using the official PyTorch repository, followed by dependencies such as NumPy, OpenCV, and PyUSB via pip. For FPGA support, install the Xilinx Vitis toolchain and configure USB permissions. Dataset paths in dataset_preprocessing.py must be updated to point to local dataset directories (e.g., COCO 2017, LISA, Mapillary). The full installation typically takes 15-25 minutes for GPU-only setups and 45-90 minutes with FPGA support, depending on network speed and hardware configuration.
+
+Execution Instructions:
+Training is initiated via python train.py for GPU mode or python train.py --fpga for FPGA acceleration. Inference on a sample image is performed using python inference.py --image sample.jpg, which outputs detection results and timing metrics. The decision-making system is executed with python decision_making_prac.py --image traffic_scene.jpg, producing state-action-reward tuples for each detected object. Benchmarking mode (--benchmark) evaluates inference speed over multiple iterations.
+
+Expected Output:
+During training, the console displays epoch-wise loss and learning rate. Inference outputs include detected object classes, coordinates, confidence scores, and processing time (e.g., "vehicle @ (320, 240) conf: 0.92, Inference time: 45.2ms"). The decision-making system logs states (e.g., "vehicle at 30m moving 10m/s"), actions ("Continue"), and rewards ("20 (safe driving)").
+
+Performance Metrics:
+On an RTX 3090 GPU, training completes in 6.5-8 hours (300 epochs, batch size 64), while FPGA training requires 9-12 hours. Inference latency is 18-22ms (GPU) or 32-38ms (FPGA) per 640x640 image. The decision-making module processes detections in 2-5ms per object on a CPU. FPGA performance varies with driver versions and hardware-specific optimizations. All timings assume default parameters and a clean system state.
